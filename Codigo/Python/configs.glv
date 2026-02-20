@@ -1,0 +1,30 @@
+{
+    "com_port": "COM9",
+    "fingers": [
+        {
+            "name": "D0",
+            "key": "a",
+            "threshold": 1010
+        },
+        {
+            "name": "D1",
+            "key": "b",
+            "threshold": 286
+        },
+        {
+            "name": "D2",
+            "key": "",
+            "threshold": 102
+        },
+        {
+            "name": "D3",
+            "key": "",
+            "threshold": 81
+        },
+        {
+            "name": "D4",
+            "key": "",
+            "threshold": 20
+        }
+    ]
+}

@@ -5,20 +5,123 @@ import sys
 import os
 import serial
 import time
+import json
 import pyautogui
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 
 
+class CalibrationThread(QThread):
+    finger_values_updated = pyqtSignal(list)
+
+    def __init__(self, com_port='COM9', configs=None):
+        super().__init__()
+        self.com_port = com_port
+        self.configs = configs or self.load_default_configs()
+        self.running = False
+        self.arduino = None
+
+    def load_default_configs(self):
+        return {
+            "com_port": "COM9",
+            "fingers": [
+                {"name": "D0", "key": "", "threshold": 630},
+                {"name": "D1", "key": "", "threshold": 480},
+                {"name": "D2", "key": "", "threshold": 480},
+                {"name": "D3", "key": "", "threshold": 480},
+                {"name": "D4", "key": "", "threshold": 600}
+            ]
+        }
+
+    def connect_arduino(self):
+        try:
+            self.arduino = serial.Serial(self.com_port, 115200, timeout=0.01)
+            time.sleep(1)
+            print(f"Conectado na porta {self.com_port} a 115200 baud para calibração")
+            return True
+        except Exception as e:
+            print(f"Erro ao conectar na porta {self.com_port}: {e}")
+            return False
+
+    def run(self):
+        if not self.connect_arduino():
+            return
+
+        print("Modo de calibração iniciado - apenas lendo potenciômetros...")
+        print("(Clique em Parar Calibração para finalizar)")
+
+        try:
+            while self.running:
+                if self.arduino.in_waiting > 0:
+                    try:
+                        linha = self.arduino.readline().decode('utf-8', errors='ignore').strip()
+                        if linha:
+                            self.read_finger_values(linha)
+                    except UnicodeDecodeError:
+                        # Ignorar linhas com erro de decodificação
+                        continue
+                time.sleep(0.001)
+
+        except Exception as e:
+            print(f"\nErro durante calibração: {e}")
+        finally:
+            if self.arduino:
+                self.arduino.close()
+            print("Calibração finalizada")
+
+    def read_finger_values(self, linha):
+        finger_names = ["indicador", "médio", "anelar", "polegar", "mindinho"]
+        finger_values = [0, 0, 0, 0, 0]
+        raw_values = [0, 0, 0, 0, 0]  # Valores brutos dos potenciômetros
+        max_val = 1024
+
+        for i, finger_config in enumerate(self.configs["fingers"]):
+            finger_tag = f"{finger_config['name']}:"
+            name = finger_names[i]
+
+            if finger_tag in linha:
+                try:
+                    valor = int(linha.split(finger_tag)[1].split()[0])
+                    percentage = max(0, min(100, 100 - int((valor / max_val) * 100)))
+                    finger_values[i] = percentage
+                    raw_values[i] = valor
+                except (ValueError, IndexError):
+                    pass
+
+        self.finger_values_updated.emit([finger_values, raw_values])
+
+    def stop(self):
+        self.running = False
+        if self.arduino:
+            try:
+                self.arduino.close()
+            except:
+                pass
+
+
 class ArduinoThread(QThread):
     finger_values_updated = pyqtSignal(list)
 
-    def __init__(self, com_port='COM9'):
+    def __init__(self, com_port='COM9', configs=None):
         super().__init__()
         self.com_port = com_port
+        self.configs = configs or self.load_default_configs()
         self.running = False
         self.arduino = None
+        self.pressed_keys = {}  # Dicionário para controlar teclas e repetição
+
+    def load_default_configs(self):
+        return {
+            "com_port": "COM9",
+            "fingers": [
+                {"name": "D0", "key": "", "threshold": 630},
+                {"name": "D1", "key": "", "threshold": 480},
+                {"name": "D2", "key": "", "threshold": 480},
+                {"name": "D3", "key": "", "threshold": 480},
+                {"name": "D4", "key": "", "threshold": 600}
+            ]
+        }
 
     def connect_arduino(self):
         try:
@@ -34,40 +137,41 @@ class ArduinoThread(QThread):
         if not self.connect_arduino():
             return
 
-        pyautogui.FAILSAFE = True
+        pyautogui.FAILSAFE = False
         pyautogui.PAUSE = 0
         sensitivity = 0.8
 
         print("Lendo dados... (Clique em Parar para finalizar)")
-        print("Mova o mouse para o canto superior esquerdo para parar em emergência")
 
         try:
             while self.running:
                 if self.arduino.in_waiting > 0:
-                    linha = self.arduino.readline().decode().strip()
-                    if linha and "X:" in linha:
-                        try:
-                            x_part = linha.split("X:")[1].split()[0]
-                            y_part = linha.split("Y:")[1].split()[0]
+                    try:
+                        linha = self.arduino.readline().decode('utf-8', errors='ignore').strip()
+                        if linha and "X:" in linha:
+                            try:
+                                x_part = linha.split("X:")[1].split()[0]
+                                y_part = linha.split("Y:")[1].split()[0]
 
-                            sensor_x = int(x_part)
-                            sensor_y = int(y_part)
+                                sensor_x = int(x_part)
+                                sensor_y = int(y_part)
 
-                            mouse_x = sensor_y * sensitivity
-                            mouse_y = -sensor_x * sensitivity
+                                mouse_x = sensor_y * sensitivity
+                                mouse_y = -sensor_x * sensitivity
 
-                            if abs(sensor_x) > 0 or abs(sensor_y) > 0:
-                                pyautogui.move(mouse_x, mouse_y)
+                                if abs(sensor_x) > 0 or abs(sensor_y) > 0:
+                                    pyautogui.move(mouse_x, mouse_y)
 
-                        except (ValueError, IndexError):
-                            pass
+                            except (ValueError, IndexError):
+                                pass
 
-                        self.detect_fingers(linha)
+                            self.detect_fingers(linha)
+                    except UnicodeDecodeError:
+                        # Ignorar linhas com erro de decodificação
+                        continue
 
                 time.sleep(0.001)
 
-        except pyautogui.FailSafeException:
-            print("\nFailSafe ativado! Mouse movido para canto superior esquerdo.")
         except Exception as e:
             print(f"\nErro durante execução: {e}")
         finally:
@@ -76,33 +180,64 @@ class ArduinoThread(QThread):
             print("Desconectado")
 
     def detect_fingers(self, linha):
-        fingers = [
-            ("D0:", 630, "indicador", 1024),
-            ("D1:", 480, "médio", 1024),
-            ("D2:", 480, "anelar", 1024),
-            ("D3:", 480, "polegar", 1024),
-            ("D4:", 600, "mindinho", 1024)
-        ]
-
+        finger_names = ["indicador", "médio", "anelar", "polegar", "mindinho"]
         finger_values = [0, 0, 0, 0, 0]
+        raw_values = [0, 0, 0, 0, 0]  # Valores brutos dos potenciômetros
+        max_val = 1024
 
-        for i, (finger_tag, threshold, name, max_val) in enumerate(fingers):
+        for i, finger_config in enumerate(self.configs["fingers"]):
+            finger_tag = f"{finger_config['name']}:"
+            threshold = finger_config["threshold"]
+            key = finger_config["key"]
+            name = finger_names[i]
+
             if finger_tag in linha:
                 try:
                     valor = int(linha.split(finger_tag)[1].split()[0])
                     percentage = max(0, min(100, 100 - int((valor / max_val) * 100)))
                     finger_values[i] = percentage
+                    raw_values[i] = valor
 
                     if valor < threshold:
-                        print(f"Dedo {name} ({finger_tag[:-1]}) detectado - Valor: {valor}, Slider: {percentage}%")
+                        # Manter tecla pressionada se configurada e repetir continuamente
+                        if key and key.strip():
+                            try:
+                                if key not in self.pressed_keys:
+                                    # Primeira vez pressionando a tecla
+                                    pyautogui.keyDown(key)
+                                    self.pressed_keys[key] = 0
+                                else:
+                                    # Repetir a tecla a cada 5 ciclos (~50ms)
+                                    self.pressed_keys[key] += 1
+                                    if self.pressed_keys[key] >= 5:
+                                        pyautogui.press(key)
+                                        self.pressed_keys[key] = 0
+                            except Exception as e:
+                                print(f"Erro ao pressionar tecla '{key}': {e}")
+                    else:
+                        # Soltar tecla quando dedo não for detectado
+                        if key and key in self.pressed_keys:
+                            try:
+                                pyautogui.keyUp(key)
+                                del self.pressed_keys[key]
+                            except Exception as e:
+                                print(f"Erro ao liberar tecla '{key}': {e}")
 
                 except (ValueError, IndexError):
                     pass
 
-        self.finger_values_updated.emit(finger_values)
+        self.finger_values_updated.emit([finger_values, raw_values])
 
     def stop(self):
         self.running = False
+        # Soltar todas as teclas pressionadas antes de parar
+        for key in list(self.pressed_keys.keys()):
+            try:
+                pyautogui.keyUp(key)
+            except:
+                pass
+        self.pressed_keys.clear()
+
         if self.arduino:
             try:
                 self.arduino.close()
@@ -114,8 +249,11 @@ class GyroGlovesWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.arduino_thread = None
+        self.calibration_thread = None
+        self.configs = self.loadConfigs()
         self.setupUI()
         self.connectSignals()
+        self.loadConfigsToUI()
 
     def setupUI(self):
         self.setObjectName("GyroGloves")
@@ -140,6 +278,7 @@ class GyroGlovesWindow(QMainWindow):
         self.sliders = []
         self.sliderLabels = []
         self.fingerInputs = []
+        self.valueLabels = []  # Labels para mostrar valores dos potenciômetros
 
         for i in range(5):
             slider = QSlider(self.centralwidget)
@@ -174,6 +313,18 @@ class GyroGlovesWindow(QMainWindow):
             """)
             char_input.setPlaceholderText("?")
             self.fingerInputs.append(char_input)
+
+            # Label para mostrar valor do potenciômetro
+            value_label = QLabel(self.centralwidget)
+            value_label.setObjectName(f"valueLabel_{i}")
+            value_label.setGeometry(QRect(self.slidePositions[i] - 10, 365, 50, 15))
+            value_label.setStyleSheet("""
+                color: rgb(206, 255, 92);
+                font: 8pt "MS Shell Dlg 2";
+                text-align: center;
+            """)
+            value_label.setText("0")
+            self.valueLabels.append(value_label)
 
         self.okButtons = []
         for i in range(5):
@@ -231,8 +382,26 @@ class GyroGlovesWindow(QMainWindow):
         """)
         self.pushButton_parar.setText("Parar")
 
+        self.pushButton_calibrar = QPushButton(self.centralwidget)
+        self.pushButton_calibrar.setGeometry(QRect(370, 240, 93, 41))
+        self.pushButton_calibrar.setCursor(QCursor(Qt.PointingHandCursor))
+        self.pushButton_calibrar.setStyleSheet("""
+            color: rgb(206, 255, 92);
+            font: 10pt "MS Shell Dlg 2";
+        """)
+        self.pushButton_calibrar.setText("Calibrar")
+
+        self.pushButton_parar_calibracao = QPushButton(self.centralwidget)
+        self.pushButton_parar_calibracao.setGeometry(QRect(468, 240, 93, 41))
+        self.pushButton_parar_calibracao.setCursor(QCursor(Qt.PointingHandCursor))
+        self.pushButton_parar_calibracao.setStyleSheet("""
+            color: rgb(206, 255, 92);
+            font: 9pt "MS Shell Dlg 2";
+        """)
+        self.pushButton_parar_calibracao.setText("Parar Calib.")
+
         self.label_imagem = QLabel(self.centralwidget)
-        self.label_imagem.setGeometry(QRect(390, 240, 221, 191))
+        self.label_imagem.setGeometry(QRect(390, 290, 221, 141))
 
         self.carregarImagem()
 
@@ -279,19 +448,104 @@ class GyroGlovesWindow(QMainWindow):
         self.pushButton_salvar.clicked.connect(self.onSalvarClicked)
         self.pushButton_iniciar.clicked.connect(self.onIniciarClicked)
         self.pushButton_parar.clicked.connect(self.onPararClicked)
+        self.pushButton_calibrar.clicked.connect(self.onCalibrarClicked)
+        self.pushButton_parar_calibracao.clicked.connect(self.onPararCalibracaoClicked)
 
         self.pushButton_parar.setEnabled(False)
+        self.pushButton_parar_calibracao.setEnabled(False)
 
-    def updateSliders(self, finger_values):
-        for i, value in enumerate(finger_values):
-            if i < len(self.sliders):
-                current_value = self.sliders[i].value()
-                if abs(current_value - value) > 2:
-                    self.sliders[i].setValue(int(value))
+    def loadConfigs(self):
+        """Carrega configurações do arquivo configs.glv"""
+        try:
+            with open('configs.glv', 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"Erro ao carregar configurações: {e}")
+            # Retorna configurações padrão
+            return {
+                "com_port": "COM9",
+                "fingers": [
+                    {"name": "D0", "key": "", "threshold": 630},
+                    {"name": "D1", "key": "", "threshold": 480},
+                    {"name": "D2", "key": "", "threshold": 480},
+                    {"name": "D3", "key": "", "threshold": 480},
+                    {"name": "D4", "key": "", "threshold": 600}
+                ]
+            }
+
+    def saveConfigs(self):
+        """Salva configurações no arquivo configs.glv"""
+        try:
+            # Atualiza configurações com valores atuais da UI
+            self.configs["com_port"] = self.lineEdit_com.text()
+
+            for i in range(5):
+                self.configs["fingers"][i]["key"] = self.fingerInputs[i].text()
+                # Manter o threshold atual (não alterar pelo botão Salvar)
+                # Os thresholds são alterados apenas pelos botões OK individuais
+
+            with open('configs.glv', 'w', encoding='utf-8') as f:
+                json.dump(self.configs, f, indent=4, ensure_ascii=False)
+
+            print("Configurações salvas com sucesso!")
+            return True
+        except Exception as e:
+            print(f"Erro ao salvar configurações: {e}")
+            return False
+
+    def loadConfigsToUI(self):
+        """Carrega configurações para a interface"""
+        try:
+            self.lineEdit_com.setText(self.configs["com_port"])
+
+            for i in range(5):
+                if i < len(self.configs["fingers"]):
+                    finger_config = self.configs["fingers"][i]
+                    self.fingerInputs[i].setText(finger_config.get("key", ""))
+                    # Converter valor bruto do potenciômetro para porcentagem do slider
+                    threshold_bruto = finger_config.get("threshold", 0)
+                    slider_value = int((threshold_bruto / 1024.0) * 100)
+                    self.sliders[i].setValue(slider_value)
+        except Exception as e:
+            print(f"Erro ao carregar configurações para UI: {e}")
+
+    def updateSliders(self, data):
+        if isinstance(data, list) and len(data) == 2:
+            finger_values, raw_values = data
+
+            # Atualizar sliders
+            for i, value in enumerate(finger_values):
+                if i < len(self.sliders):
+                    current_value = self.sliders[i].value()
+                    if abs(current_value - value) > 2:
+                        self.sliders[i].setValue(int(value))
+
+            # Atualizar labels dos valores brutos
+            for i, raw_value in enumerate(raw_values):
+                if i < len(self.valueLabels):
+                    self.valueLabels[i].setText(str(raw_value))
+        else:
+            # Compatibilidade com formato antigo (apenas finger_values)
+            finger_values = data
+            for i, value in enumerate(finger_values):
+                if i < len(self.sliders):
+                    current_value = self.sliders[i].value()
+                    if abs(current_value - value) > 2:
+                        self.sliders[i].setValue(int(value))
 
     def onOkClicked(self, index):
         slider_value = self.sliders[index].value()
-        print(f"OK {index} clicado - Slider D{index} valor: {slider_value}")
+        finger_key = self.fingerInputs[index].text()
+        # Pegar o valor atual do potenciômetro mostrado na label
+        current_raw_value = int(self.valueLabels[index].text()) if self.valueLabels[index].text().isdigit() else 0
+        print(
+            f"OK {index} clicado - Slider D{index} valor: {slider_value}%, Valor atual potenciômetro: {current_raw_value}, Tecla: '{finger_key}'")
+
+        # Salva o valor atual do potenciômetro como threshold
+        if index < len(self.configs["fingers"]):
+            self.configs["fingers"][index]["threshold"] = current_raw_value
+            self.configs["fingers"][index]["key"] = finger_key
+            self.saveConfigs()
 
     def onSliderChanged(self, index, value):
         print(f"Slider D{index} mudou para: {value}")
@@ -309,12 +563,18 @@ class GyroGlovesWindow(QMainWindow):
         caracteres = [input_field.text() for input_field in self.fingerInputs]
         print(f"Caracteres dos dedos: {caracteres}")
 
+        # Salva todas as configurações
+        if self.saveConfigs():
+            QMessageBox.information(self, "Sucesso", "Configurações salvas com sucesso!")
+        else:
+            QMessageBox.warning(self, "Erro", "Erro ao salvar configurações!")
+
     def onIniciarClicked(self):
         if self.arduino_thread is None or not self.arduino_thread.isRunning():
             com_port = self.lineEdit_com.text() or "COM9"
             print(f"Iniciando comunicação com Arduino na porta {com_port}...")
 
-            self.arduino_thread = ArduinoThread(com_port)
+            self.arduino_thread = ArduinoThread(com_port, self.configs)
             self.arduino_thread.running = True
 
             self.arduino_thread.finger_values_updated.connect(self.updateSliders)
@@ -348,7 +608,49 @@ class GyroGlovesWindow(QMainWindow):
 
         print("Comunicação parada.")
 
+    def onCalibrarClicked(self):
+        if self.calibration_thread is None or not self.calibration_thread.isRunning():
+            com_port = self.lineEdit_com.text() or "COM9"
+            print(f"Iniciando calibração na porta {com_port}...")
+
+            self.calibration_thread = CalibrationThread(com_port, self.configs)
+            self.calibration_thread.running = True
+
+            self.calibration_thread.finger_values_updated.connect(self.updateSliders)
+
+            self.calibration_thread.start()
+
+            self.pushButton_calibrar.setText("Calibrando...")
+            self.pushButton_calibrar.setEnabled(False)
+            self.pushButton_parar_calibracao.setEnabled(True)
+            self.pushButton_iniciar.setEnabled(False)  # Desabilita iniciar durante calibração
+        else:
+            print("Calibração já está executando!")
+
+    def onPararCalibracaoClicked(self):
+        print("Parando calibração...")
+
+        if self.calibration_thread and self.calibration_thread.isRunning():
+            try:
+                self.calibration_thread.finger_values_updated.disconnect(self.updateSliders)
+            except:
+                pass
+
+            self.calibration_thread.stop()
+            self.calibration_thread.wait(2000)
+
+            if self.calibration_thread.isRunning():
+                self.calibration_thread.terminate()
+
+        self.pushButton_calibrar.setText("Calibrar")
+        self.pushButton_calibrar.setEnabled(True)
+        self.pushButton_parar_calibracao.setEnabled(False)
+        self.pushButton_iniciar.setEnabled(True)  # Reabilita iniciar
+
+        print("Calibração parada.")
+
     def closeEvent(self, event):
+        # Finaliza thread principal se estiver rodando
         if self.arduino_thread and self.arduino_thread.isRunning():
             print("Finalizando conexão com Arduino...")
 
@@ -362,6 +664,21 @@ class GyroGlovesWindow(QMainWindow):
 
             if self.arduino_thread.isRunning():
                 self.arduino_thread.terminate()
+
+        # Finaliza thread de calibração se estiver rodando
+        if self.calibration_thread and self.calibration_thread.isRunning():
+            print("Finalizando calibração...")
+
+            try:
+                self.calibration_thread.finger_values_updated.disconnect(self.updateSliders)
+            except:
+                pass
+
+            self.calibration_thread.stop()
+            self.calibration_thread.wait(2000)
+
+            if self.calibration_thread.isRunning():
+                self.calibration_thread.terminate()
 
         event.accept()
 
